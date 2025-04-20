@@ -42,7 +42,7 @@ cd ai-document-assistant
 
 
 Make the setup script executable (Linux/macOS):chmod +x setup_and_run.sh
-
+(Windows) : bash ./setup_and_run.sh
 
 Run the setup script:./setup_and_run.sh
 

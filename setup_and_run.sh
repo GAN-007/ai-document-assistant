@@ -14,6 +14,7 @@ LOG_FILE="setup_and_run.log"
 BACKEND_LOG="backend.log"
 FRONTEND_LOG="frontend.log"
 LOG_MAX_SIZE=$((10*1024*1024)) # 10MB
+OLLAMA_PORT=11434
 
 # Initialize ports from arguments
 BACKEND_PORT=$DEFAULT_BACKEND_PORT
@@ -35,6 +36,8 @@ show_help() {
     echo "  Main log: $LOG_FILE"
     echo "  Backend log: $BACKEND_LOG"
     echo "  Frontend log: $FRONTEND_LOG"
+    echo "Note for Windows/Git Bash users:"
+    echo "  Ensure Git Bash includes tools like curl, wget, or lsof. Install via MSYS2 if needed."
     exit 0
 }
 
@@ -84,9 +87,19 @@ log() {
 # Rotate log file if too large
 rotate_log() {
     local file="$1"
-    if [ -f "$file" ] && [ "$(stat -c %s "$file" 2>/dev/null || stat -f %z "$file")" -gt "$LOG_MAX_SIZE" ]; then
-        mv "$file" "${file}.$(date '+%Y%m%d%H%M%S').bak"
-        log "INFO" "Rotated $file due to size exceeding $LOG_MAX_SIZE bytes."
+    if [ -f "$file" ]; then
+        local size
+        if stat -c %s "$file" >/dev/null 2>&1; then
+            size=$(stat -c %s "$file")
+        elif stat -f %z "$file" >/dev/null 2>&1; then
+            size=$(stat -f %z "$file")
+        else
+            size=0
+        fi
+        if [ "$size" -gt "$LOG_MAX_SIZE" ]; then
+            mv "$file" "${file}.$(date '+%Y%m%d%H%M%S').bak"
+            log "INFO" "Rotated $file due to size exceeding $LOG_MAX_SIZE bytes."
+        fi
     fi
 }
 
@@ -117,6 +130,7 @@ check_port() {
         return 1
     else
         log "WARNING" "No port-checking tools (lsof, netstat, ss) found. Assuming port $port is free, but this may cause conflicts."
+        log "INFO" "For Git Bash, install tools via MSYS2: pacman -S lsof net-tools."
     fi
     return 0
 }
@@ -147,6 +161,7 @@ check_service() {
         done
     else
         log "WARNING" "Neither curl nor wget found, skipping $name accessibility check."
+        log "INFO" "For Git Bash, install curl/wget via MSYS2: pacman -S curl wget."
         return 0
     fi
     log "ERROR" "$name failed to start or is not accessible at $url. Check ${name,,}.log for details."
@@ -180,7 +195,9 @@ if ! command_exists "$PYTHON_CMD"; then
 fi
 PYTHON_VERSION=$($PYTHON_CMD --version 2>&1)
 PYTHON_MAJOR_MINOR=$(echo "$PYTHON_VERSION" | grep -oE '[0-9]+\.[0-9]+' | head -1)
-if [ "$(echo "$PYTHON_MAJOR_MINOR < 3.8" | bc -l)" -eq 1 ]; then
+PYTHON_MAJOR=${PYTHON_MAJOR_MINOR%%.*}
+PYTHON_MINOR=${PYTHON_MAJOR_MINOR##*.}
+if [ "$PYTHON_MAJOR" -lt 3 ] || { [ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt 8 ]; }; then
     log "ERROR" "Python $PYTHON_VERSION is too old. Please install Python 3.8 or higher."
     exit 1
 fi
@@ -210,25 +227,40 @@ log "INFO" "npm found: $NPM_VERSION"
 # Check and start Ollama
 if command_exists ollama; then
     log "INFO" "Checking Ollama service..."
-    # Check if Ollama service is running
-    if ! pgrep -f "ollama serve" >/dev/null; then
+    # Check if Ollama is running by port or process
+    OLLAMA_RUNNING=false
+    if check_port "$OLLAMA_PORT"; then
+        log "INFO" "Ollama port $OLLAMA_PORT is free, no service detected."
+    else
+        OLLAMA_RUNNING=true
+        log "INFO" "Ollama service detected on port $OLLAMA_PORT."
+    fi
+
+    # Try to get PID if running
+    if $OLLAMA_RUNNING && command_exists ps; then
+        OLLAMA_PID=$(ps aux | grep -i "[o]llama serve" | awk '{print $2}' | head -1)
+        if [ -n "$OLLAMA_PID" ]; then
+            log "INFO" "Ollama service is running (PID: $OLLAMA_PID)."
+        fi
+    fi
+
+    # Start Ollama if not running
+    if ! $OLLAMA_RUNNING; then
         log "INFO" "Ollama service not running, attempting to start..."
         ollama serve &
         OLLAMA_PID=$!
         sleep 5
-        if ! ps -p $OLLAMA_PID >/dev/null; then
-            log "ERROR" "Failed to start Ollama service."
+        if ! ps -p $OLLAMA_PID >/dev/null 2>&1; then
+            log "ERROR" "Failed to start Ollama service. Check if port $OLLAMA_PORT is in use."
+            log "INFO" "Run 'netstat -tuln | grep $OLLAMA_PORT' or 'lsof -i :$OLLAMA_PORT' to diagnose."
             exit 1
         fi
+        OLLAMA_RUNNING=true
         log "SUCCESS" "Ollama service started (PID: $OLLAMA_PID)."
-    else
-        # Get PID of existing Ollama service
-        OLLAMA_PID=$(pgrep -f "ollama serve" | head -1)
-        log "INFO" "Ollama service is already running (PID: $OLLAMA_PID)."
     fi
 
     # Verify Ollama API
-    if command_exists curl && ! curl -s --connect-timeout 5 http://localhost:11434 >/dev/null; then
+    if command_exists curl && ! curl -s --connect-timeout 5 http://localhost:$OLLAMA_PORT >/dev/null; then
         log "WARNING" "Ollama API is not responsive. Models may not work correctly."
     fi
 
@@ -238,15 +270,24 @@ if command_exists ollama; then
             log "INFO" "Ollama model $model is available."
         else
             log "INFO" "Ollama model $model not found, pulling..."
-            if timeout 300 ollama pull "$model" >> "$LOG_FILE" 2>&1; then
-                log "SUCCESS" "Ollama model $model pulled successfully."
+            if command_exists timeout; then
+                if timeout 300 ollama pull "$model" >> "$LOG_FILE" 2>&1; then
+                    log "SUCCESS" "Ollama model $model pulled successfully."
+                else
+                    log "WARNING" "Failed to pull Ollama model $model after 5 minutes. T5 will be used as fallback."
+                fi
             else
-                log "WARNING" "Failed to pull Ollama model $model after 5 minutes. T5 will be used as fallback."
+                if ollama pull "$model" >> "$LOG_FILE" 2>&1; then
+                    log "SUCCESS" "Ollama model $model pulled successfully."
+                else
+                    log "WARNING" "Failed to pull Ollama model $model. T5 will be used as fallback."
+                fi
             fi
         fi
     done
 else
     log "WARNING" "Ollama not found. T5 will be used as fallback."
+    log "INFO" "For Git Bash, install Ollama separately or ensure it's in PATH."
 fi
 
 # Check ports
@@ -289,7 +330,7 @@ log "INFO" "Starting backend and frontend servers..."
 $PYTHON_CMD -m uvicorn --app-dir "$BACKEND_DIR/app" main:app --host 0.0.0.0 --port "$BACKEND_PORT" > "$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
 sleep 2
-if ps -p $BACKEND_PID >/dev/null; then
+if ps -p $BACKEND_PID >/dev/null 2>&1; then
     log "SUCCESS" "Backend started successfully (PID: $BACKEND_PID)."
     check_service "http://localhost:$BACKEND_PORT" "Backend"
 else
@@ -302,7 +343,7 @@ pushd "$FRONTEND_DIR" >/dev/null
 npm run dev -- --port "$FRONTEND_PORT" > "../$FRONTEND_LOG" 2>&1 &
 FRONTEND_PID=$!
 sleep 10 # Increased delay for Vite startup
-if ps -p $FRONTEND_PID >/dev/null; then
+if ps -p $FRONTEND_PID >/dev/null 2>&1; then
     log "SUCCESS" "Frontend started successfully (PID: $FRONTEND_PID)."
     check_service "http://localhost:$FRONTEND_PORT" "Frontend"
 else
@@ -328,7 +369,7 @@ trap 'cleanup' SIGINT SIGTERM
 cleanup() {
     log "INFO" "Stopping services..."
     for pid in "$BACKEND_PID" "$FRONTEND_PID" "$OLLAMA_PID"; do
-        if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null; then
+        if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then
             # Kill process and its children
             pkill -P "$pid" 2>/dev/null
             kill "$pid" 2>/dev/null
@@ -342,7 +383,7 @@ cleanup() {
 
 # Monitor processes
 while true; do
-    if ! ps -p "$BACKEND_PID" >/dev/null || ! ps -p "$FRONTEND_PID" >/dev/null; then
+    if ! ps -p "$BACKEND_PID" >/dev/null 2>&1 || ! ps -p "$FRONTEND_PID" >/dev/null 2>&1; then
         log "ERROR" "One or more services stopped unexpectedly. Check $BACKEND_LOG or $FRONTEND_LOG."
         cleanup
     fi
