@@ -2,17 +2,22 @@ from pydantic import BaseModel
 from typing import List
 
 class Suggestion(BaseModel):
-    text: str
-    type: str
+    id: int
+    start: int
+    end: int
+    original_text: str
+    improved_text: str
+    reason: str
+    status: str
 
     class Config:
-        from_attributes = True
+        orm_mode = True
 
 class DocumentResponse(BaseModel):
     originalText: str
     improvedText: str
     suggestions: List[Suggestion]
-    filename: str
+    filename: str = "unnamed_document"
 
     class Config:
-        from_attributes = True
+        orm_mode = True

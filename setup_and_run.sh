@@ -128,6 +128,20 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Function to check for null bytes in a file using Python
+check_null_bytes() {
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        return 0
+    fi
+    if $PYTHON_CMD -c "with open('$file', 'rb') as f: content = f.read(); exit(0 if b'\x00' not in content else 1)" 2>/dev/null; then
+        return 0
+    else
+        log "ERROR" "Null bytes detected in $file. Replacing with a clean version."
+        return 1
+    fi
+}
+
 # Function to check if a port is in use (exclude Ollama port during conflict checks)
 check_port() {
     local port=$1
@@ -524,14 +538,65 @@ class Config(BaseSettings):
     DATABASE_URL: str = "sqlite:///documents.db"
 
 config = Config()
+SUPPORTED_FILE_TYPES = config.supported_file_types
+MODEL_INFO = config.model_info
 EOL
     log "INFO" "Created $BACKEND_DIR/app/settings/config.py with default settings."
 fi
-# Validate endpoints.py for null bytes
-if [ -f "$BACKEND_DIR/app/api/endpoints.py" ]; then
-    if hexdump -ve '/1 "%02x"' "$BACKEND_DIR/app/api/endpoints.py" | grep -q "00"; then
-        log "ERROR" "Null bytes detected in $BACKEND_DIR/app/api/endpoints.py. Replacing with a clean version."
-        cat > "$BACKEND_DIR/app/api/endpoints.py" <<EOL
+# Validate critical files for null bytes
+for file in "$BACKEND_DIR/app/settings/config.py" "$BACKEND_DIR/app/api/endpoints.py" "$BACKEND_DIR/app/core/auth.py" "$BACKEND_DIR/app/core/document_processor.py" "$BACKEND_DIR/app/database/db.py" "$BACKEND_DIR/app/api/models.py"; do
+    if [ -f "$file" ] && ! check_null_bytes "$file"; then
+        case $(basename "$file") in
+            config.py)
+                cat > "$file" <<EOL
+from pydantic_settings import BaseSettings
+
+class Config(BaseSettings):
+    # Application metadata
+    app_name: str = "AI Document Assistant"
+    api_version: str = "1.0.0"
+    jwt_secret: str = "your-secret-key-here"
+
+    # File processing settings
+    max_file_size: int = 10 * 1024 * 1024  # 10MB
+    supported_file_types: list = [
+        {"mime_type": "application/pdf", "name": "PDF", "icon": "📄"},
+        {"mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "name": "DOCX", "icon": "📝"},
+        {"mime_type": "text/plain", "name": "TXT", "icon": "📝"},
+        {"mime_type": "text/csv", "name": "CSV", "icon": "📊"},
+        {"mime_type": "application/vnd.ms-excel", "name": "XLS", "icon": "📊"},
+        {"mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "name": "XLSX", "icon": "📊"},
+        {"mime_type": "application/sql", "name": "SQL", "icon": "🗄️"},
+        {"mime_type": "application/zip", "name": "ZIP", "icon": "📦"},
+        {"mime_type": "application/x-rar", "name": "RAR", "icon": "📦"},
+    ]
+
+    # AI model settings
+    ai: dict = {
+        "model_type": "multi-model",
+        "ollama_model_primary": "llama3.1:latest",
+        "ollama_model_secondary": "llama2:latest",
+        "t5_model_name": "t5-small"
+    }
+
+    # Model metadata
+    model_info: dict = {
+        "name": "Multi-Model Document Enhancer",
+        "version": "1.0.0",
+        "description": "Supports Llama3.1, Llama2 (Ollama), and T5 (Hugging Face) for text improvement."
+    }
+
+    # Ollama and database settings
+    OLLAMA_API_URL: str = "http://localhost:11434"
+    DATABASE_URL: str = "sqlite:///documents.db"
+
+config = Config()
+SUPPORTED_FILE_TYPES = config.supported_file_types
+MODEL_INFO = config.model_info
+EOL
+                ;;
+            endpoints.py)
+                cat > "$file" <<EOL
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -632,8 +697,119 @@ async def get_file_types():
 async def get_model_info():
     return MODEL_INFO
 EOL
+                ;;
+            auth.py)
+                cat > "$file" <<EOL
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+from app.settings.config import config
+from app.api.models import User
+from app.database.db import get_db
+from sqlalchemy.orm import Session
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, config.jwt_secret, algorithm="HS256")
+    return encoded_jwt
+
+async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, config.jwt_secret, algorithms=["HS256"])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        raise credentials_exception
+    return user
+EOL
+                ;;
+            document_processor.py)
+                cat > "$file" <<EOL
+from app.schemas.document import Suggestion
+
+async def process_document(filename: str, content: bytes, content_type: str):
+    # Placeholder: Implement AI processing with Ollama or T5
+    original_text = content.decode('utf-8', errors='ignore')
+    improved_text = original_text.upper()  # Dummy improvement
+    suggestions = [Suggestion(text="Example suggestion", type="style")]
+    return original_text, improved_text, suggestions
+EOL
+                ;;
+            db.py)
+                cat > "$file" <<EOL
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from app.settings.config import config
+
+engine = create_engine(config.DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def init_db():
+    from app.api.models import User, Document
+    Base.metadata.create_all(bind=engine)
+EOL
+                ;;
+            models.py)
+                cat > "$file" <<EOL
+from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy.orm import relationship
+from app.database.db import Base
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    hashed_password = Column(String)
+    role = Column(String, default="user")
+    documents = relationship("Document", back_populates="user")
+
+class Document(Base):
+    __tablename__ = "documents"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    filename = Column(String, index=True)
+    content = Column(String)
+    user = relationship("User", back_populates="documents")
+EOL
+                ;;
+        esac
+        log "INFO" "Replaced $file with a clean version."
     fi
-fi
+done
 # Validate schema files
 if [ -f "$BACKEND_DIR/app/schemas/user.py" ]; then
     if ! grep -q "UserResponse" "$BACKEND_DIR/app/schemas/user.py"; then

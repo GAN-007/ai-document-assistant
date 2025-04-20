@@ -15,3 +15,4 @@ pydantic-settings>=2.5.2
 email-validator>=2.2.0
 pydantic>=2.9.2
 requests>=2.32.3
+bcrypt>=4.2.0
