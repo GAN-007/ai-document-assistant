@@ -356,7 +356,7 @@ done
 log "INFO" "Installing backend dependencies..."
 pushd "$BACKEND_DIR" >/dev/null || { log "ERROR" "Backend directory not found."; exit 1; }
 if [ ! -f "requirements.txt" ]; then
-    log "ERROR" "requirements.txt not found in $BACKEND_DIR. Creating a minimal version."
+    log "INFO" "requirements.txt not found in $BACKEND_DIR. Creating a minimal version."
     cat > requirements.txt <<EOL
 fastapi>=0.115.0
 uvicorn>=0.32.0
@@ -371,14 +371,53 @@ transformers>=4.45.2
 torch>=2.4.1
 requests>=2.32.3
 EOL
+else
+    # Fix any malformed entries in requirements.txt
+    if grep -q "pydanticpydantic-settings" requirements.txt; then
+        log "WARNING" "Found malformed 'pydanticpydantic-settings' in requirements.txt. Correcting to 'pydantic-settings>=2.5.2'."
+        sed -i 's/pydanticpydantic-settings.*/pydantic-settings>=2.5.2/' requirements.txt
+    fi
 fi
 # Install build tools
 $PYTHON_CMD -m pip install --upgrade pip setuptools wheel >> "$LOG_FILE" 2>&1
 # Clear pip cache to avoid corrupted downloads
 $PYTHON_CMD -m pip cache purge >> "$LOG_FILE" 2>&1
+# Check Python version compatibility (Python 3.13 might have issues with some packages)
+if [ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -ge 13 ]; then
+    log "WARNING" "Python 3.13 detected. Some packages may not be compatible. Using virtual environment."
+    if [ ! -d "venv" ]; then
+        log "INFO" "Creating a virtual environment to isolate dependencies."
+        $PYTHON_CMD -m venv venv >> "$LOG_FILE" 2>&1
+        if [ $? -ne 0 ]; then
+            log "ERROR" "Failed to create virtual environment. Consider downgrading Python to 3.8-3.11."
+            log "INFO" "Alternatively, install manually: python -m pip install -r requirements.txt"
+            popd >/dev/null
+            exit 1
+        fi
+    fi
+    if $IS_WINDOWS; then
+        source venv/Scripts/activate >> "$LOG_FILE" 2>&1
+        PYTHON_CMD="$PWD/venv/Scripts/python"
+        PIP_CMD="$PWD/venv/Scripts/pip"
+    else
+        source venv/bin/activate >> "$LOG_FILE" 2>&1
+        PYTHON_CMD="$PWD/venv/bin/python"
+        PIP_CMD="$PWD/venv/bin/pip"
+    fi
+    if [ $? -eq 0 ]; then
+        log "INFO" "Virtual environment activated. Upgrading pip and installing build tools."
+        $PIP_CMD install --upgrade pip setuptools wheel >> "$LOG_FILE" 2>&1
+    else
+        log "ERROR" "Failed to activate virtual environment. Ensure venv module is available."
+        popd >/dev/null
+        exit 1
+    fi
+else
+    PIP_CMD="$PYTHON_CMD -m pip"
+fi
 # Try installing dependencies with retries
 for attempt in {1..3}; do
-    if $PYTHON_CMD -m pip install -r requirements.txt > pip_install.log 2>&1; then
+    if $PIP_CMD install -r requirements.txt > pip_install.log 2>&1; then
         log "SUCCESS" "Backend dependencies installed successfully."
         break
     else
@@ -394,7 +433,8 @@ if [ ! -f "pip_install.log" ] || grep -q "ERROR" pip_install.log; then
     log "INFO" "- Verify requirements.txt for compatible versions."
     log "INFO" "- Install build tools: python -m pip install setuptools wheel"
     log "INFO" "- Clear pip cache: python -m pip cache purge"
-    log "INFO" "- Test manually: cd $BACKEND_DIR && $PYTHON_CMD -m pip install -r requirements.txt"
+    log "INFO" "- If using Python 3.13, consider downgrading to Python 3.8-3.11 for better compatibility."
+    log "INFO" "- Test manually: cd $BACKEND_DIR && $PIP_CMD install -r requirements.txt"
     if [ -f pip_install.log ]; then
         cat pip_install.log | grep -i "ERROR" | head -n 10 | tee -a "$LOG_FILE"
     fi
@@ -402,15 +442,15 @@ if [ ! -f "pip_install.log" ] || grep -q "ERROR" pip_install.log; then
     exit 1
 fi
 # Ensure pydantic-settings and email-validator are installed
-if ! grep -q "pydantic-settings" "requirements.txt"; then
+if ! grep -q "pydantic-settings" requirements.txt; then
     log "WARNING" "pydantic-settings not found in $BACKEND_DIR/requirements.txt. Adding pydantic-settings>=2.5.2."
-    echo "pydantic-settings>=2.5.2" >> "requirements.txt"
-    $PYTHON_CMD -m pip install pydantic-settings>=2.5.2 >> "$LOG_FILE" 2>&1
+    echo "pydantic-settings>=2.5.2" >> requirements.txt
+    $PIP_CMD install pydantic-settings>=2.5.2 >> "$LOG_FILE" 2>&1
 fi
-if ! grep -q "email-validator" "requirements.txt"; then
+if ! grep -q "email-validator" requirements.txt; then
     log "WARNING" "email-validator not found in $BACKEND_DIR/requirements.txt. Adding email-validator>=2.2.0."
-    echo "email-validator>=2.2.0" >> "requirements.txt"
-    $PYTHON_CMD -m pip install email-validator>=2.2.0 >> "$LOG_FILE" 2>&1
+    echo "email-validator>=2.2.0" >> requirements.txt
+    $PIP_CMD install email-validator>=2.2.0 >> "$LOG_FILE" 2>&1
 fi
 rm -f pip_install.log
 popd >/dev/null
@@ -501,7 +541,7 @@ if ! $PYTHON_CMD -c "import sys; sys.path.append('$BACKEND_DIR'); from main impo
     log "INFO" "Common fixes:"
     log "INFO" "- Verify syntax and imports in $BACKEND_DIR/main.py."
     log "INFO" "- Ensure $BACKEND_DIR/settings/config.py exists and is correct."
-    log "INFO" "- Reinstall dependencies: cd $BACKEND_DIR && $PYTHON_CMD -m pip install -r requirements.txt"
+    log "INFO" "- Reinstall dependencies: cd $BACKEND_DIR && $PIP_CMD install -r requirements.txt"
     log "INFO" "- Test manually: cd $BACKEND_DIR && $PYTHON_CMD -c 'from main import app'"
     cat main_import.log | tee -a "$BACKEND_LOG"
     rm -f main_import.log
@@ -510,7 +550,7 @@ fi
 rm -f main_import.log
 
 # Start backend
-$PYTHON_CMD -m uvicorn --app-dir "$BACKEND_DIR" main:app --host 0.0.0.0 --port "$BACKEND_PORT" > uvicorn.log 2>&1 &
+$PIP_CMD run uvicorn --app-dir "$BACKEND_DIR" main:app --host 0.0.0.0 --port "$BACKEND_PORT" > uvicorn.log 2>&1 &
 BACKEND_PID=$!
 sleep 5 # Increased delay to capture startup errors
 if ps -p $BACKEND_PID >/dev/null 2>&1; then
@@ -522,7 +562,7 @@ else
     log "INFO" "- Verify $BACKEND_DIR/main.py has a valid FastAPI app."
     log "INFO" "- Check port $BACKEND_PORT: netstat -ano | findstr :$BACKEND_PORT"
     log "INFO" "- Ensure dependencies are compatible with Python $PYTHON_VERSION."
-    log "INFO" "- Test manually: cd $BACKEND_DIR && $PYTHON_CMD -m uvicorn --app-dir . main:app --host 0.0.0.0 --port $BACKEND_PORT"
+    log "INFO" "- Test manually: cd $BACKEND_DIR && $PIP_CMD run uvicorn --app-dir . main:app --host 0.0.0.0 --port $BACKEND_PORT"
     cat uvicorn.log | grep -i "ERROR" | tee -a "$BACKEND_LOG"
     rm -f uvicorn.log
     exit 1
