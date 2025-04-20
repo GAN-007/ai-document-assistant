@@ -1,4 +1,3 @@
-```bash
 #!/bin/bash
 
 # AI Document Assistant Setup and Run Script
