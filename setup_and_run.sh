@@ -1,3 +1,4 @@
+```bash
 #!/bin/bash
 
 # AI Document Assistant Setup and Run Script
@@ -370,6 +371,12 @@ if ! $PYTHON_CMD -m pip install -r requirements.txt > pip_install.log 2>&1; then
     popd >/dev/null
     exit 1
 fi
+# Ensure pydantic is installed
+if ! grep -q "pydantic" "requirements.txt"; then
+    log "WARNING" "pydantic not found in $BACKEND_DIR/requirements.txt. Adding pydantic>=2.0.0."
+    echo "pydantic>=2.0.0" >> "requirements.txt"
+    $PYTHON_CMD -m pip install pydantic>=2.0.0 >> "$LOG_FILE" 2>&1
+fi
 log "SUCCESS" "Backend dependencies installed successfully."
 rm -f pip_install.log
 popd >/dev/null
@@ -406,12 +413,50 @@ if ! grep -q "from fastapi import FastAPI" "$BACKEND_DIR/main.py" || ! grep -q "
 fi
 # Check for settings module
 if ! [ -f "$BACKEND_DIR/settings/config.py" ]; then
-    log "WARNING" "Settings module $BACKEND_DIR/settings/config.py not found. Creating a minimal configuration."
+    log "WARNING" "Settings module $BACKEND_DIR/settings/config.py not found. Creating a comprehensive configuration."
     mkdir -p "$BACKEND_DIR/settings"
     cat > "$BACKEND_DIR/settings/config.py" <<EOL
-class Config:
-    OLLAMA_API_URL = "http://localhost:11434"
-    DATABASE_URL = "sqlite:///documents.db"
+from pydantic import BaseSettings
+
+class Config(BaseSettings):
+    # Application metadata
+    app_name: str = "AI Document Assistant"
+    api_version: str = "1.0.0"
+    jwt_secret: str = "your-secret-key-here"
+
+    # File processing settings
+    max_file_size: int = 10 * 1024 * 1024  # 10MB
+    supported_file_types: list = [
+        {"mime_type": "application/pdf", "name": "PDF", "icon": "📄"},
+        {"mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "name": "DOCX", "icon": "📝"},
+        {"mime_type": "text/plain", "name": "TXT", "icon": "📝"},
+        {"mime_type": "text/csv", "name": "CSV", "icon": "📊"},
+        {"mime_type": "application/vnd.ms-excel", "name": "XLS", "icon": "📊"},
+        {"mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "name": "XLSX", "icon": "📊"},
+        {"mime_type": "application/sql", "name": "SQL", "icon": "🗄️"},
+        {"mime_type": "application/zip", "name": "ZIP", "icon": "📦"},
+        {"mime_type": "application/x-rar", "name": "RAR", "icon": "📦"},
+    ]
+
+    # AI model settings
+    ai: dict = {
+        "model_type": "multi-model",
+        "ollama_model_primary": "llama3.1:latest",
+        "ollama_model_secondary": "llama2:latest",
+        "t5_model_name": "t5-small"
+    }
+
+    # Model metadata
+    model_info: dict = {
+        "name": "Multi-Model Document Enhancer",
+        "version": "1.0.0",
+        "description": "Supports Llama3.1, Llama2 (Ollama), and T5 (Hugging Face) for text improvement."
+    }
+
+    # Ollama and database settings
+    OLLAMA_API_URL: str = "http://localhost:11434"
+    DATABASE_URL: str = "sqlite:///documents.db"
+
 config = Config()
 EOL
     log "INFO" "Created $BACKEND_DIR/settings/config.py with default settings."
