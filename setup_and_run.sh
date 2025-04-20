@@ -135,6 +135,8 @@ check_port() {
     if $IS_WINDOWS; then
         if command_exists netstat && netstat -ano | findstr ":$port" | findstr "LISTENING" >/dev/null; then
             port_in_use=true
+        elif command_exists netstat && netstat -ano | findstr ":$port" >/dev/null; then
+            port_in_use=true
         fi
     else
         if command_exists lsof && lsof -i :"$port" -sTCP:LISTEN >/dev/null; then
@@ -150,14 +152,10 @@ check_port() {
         port_in_use=true
     fi
     if $port_in_use; then
+        log "ERROR" "Port $port is already in use. Specify a different port with --backend-port or --frontend-port."
         return 1
     fi
-    log "WARNING" "No reliable port-checking tools found. Assuming port $port is free, but this may cause conflicts."
-    if $IS_WINDOWS; then
-        log "INFO" "Run 'netstat -ano | findstr :$port' or install net-tools via MSYS2: pacman -S net-tools"
-    else
-        log "INFO" "Install tools: sudo apt-get install lsof net-tools || sudo yum install lsof net-tools"
-    fi
+    log "INFO" "Port $port is free."
     return 0
 }
 
@@ -271,7 +269,10 @@ if command_exists ollama; then
     # Try to get PID if running
     if $OLLAMA_RUNNING; then
         if $IS_WINDOWS && command_exists tasklist; then
-            OLLAMA_PID=$(tasklist | findstr /I ollama.exe | awk 'NR==1 {print $2}')
+            OLLAMA_PID=$(tasklist | findstr /I ollama.exe | awk 'NR==1 {print $2}' 2>/dev/null)
+            if [ -z "$OLLAMA_PID" ] && command_exists netstat; then
+                OLLAMA_PID=$(netstat -ano | findstr ":$OLLAMA_PORT" | findstr "LISTENING" | awk '{print $5}' | head -1)
+            fi
         elif command_exists ps; then
             OLLAMA_PID=$(ps aux | grep -i "[o]llama serve" | awk '{print $2}' | head -1)
         fi
@@ -345,7 +346,6 @@ fi
 # Check ports
 for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
     if ! check_port "$port"; then
-        log "ERROR" "Port $port is already in use. Please specify a different port using --backend-port or --frontend-port."
         exit 1
     fi
 done
@@ -370,11 +370,11 @@ if ! $PYTHON_CMD -m pip install -r requirements.txt > pip_install.log 2>&1; then
     popd >/dev/null
     exit 1
 fi
-# Ensure pydantic is installed
-if ! grep -q "pydantic" "requirements.txt"; then
-    log "WARNING" "pydantic not found in $BACKEND_DIR/requirements.txt. Adding pydantic>=2.0.0."
-    echo "pydantic>=2.0.0" >> "requirements.txt"
-    $PYTHON_CMD -m pip install pydantic>=2.0.0 >> "$LOG_FILE" 2>&1
+# Ensure pydantic-settings is installed
+if ! grep -q "pydantic-settings" "requirements.txt"; then
+    log "WARNING" "pydantic-settings not found in $BACKEND_DIR/requirements.txt. Adding pydantic-settings>=2.0.0."
+    echo "pydantic-settings>=2.0.0" >> "requirements.txt"
+    $PYTHON_CMD -m pip install pydantic-settings>=2.0.0 >> "$LOG_FILE" 2>&1
 fi
 log "SUCCESS" "Backend dependencies installed successfully."
 rm -f pip_install.log
@@ -415,7 +415,7 @@ if ! [ -f "$BACKEND_DIR/settings/config.py" ]; then
     log "WARNING" "Settings module $BACKEND_DIR/settings/config.py not found. Creating a comprehensive configuration."
     mkdir -p "$BACKEND_DIR/settings"
     cat > "$BACKEND_DIR/settings/config.py" <<EOL
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings
 
 class Config(BaseSettings):
     # Application metadata
