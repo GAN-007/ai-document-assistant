@@ -46,6 +46,7 @@ show_help() {
     echo "Note for Windows/Git Bash users:"
     echo "  Install tools like net-tools, curl, wget via MSYS2: pacman -S net-tools curl wget"
     echo "  For Ollama port conflicts, use 'netstat -ano | findstr :$OLLAMA_PORT' or Task Manager."
+    echo "  Use a virtual environment to avoid Python conflicts: python -m venv venv"
     exit 0
 }
 
@@ -130,21 +131,25 @@ command_exists() {
 # Function to check if a port is in use
 check_port() {
     local port=$1
+    local port_in_use=false
     if $IS_WINDOWS; then
         if command_exists netstat && netstat -ano | grep -i "LISTEN" | grep -q ":$port "; then
-            return 1
+            port_in_use=true
         fi
     else
         if command_exists lsof && lsof -i :"$port" -sTCP:LISTEN >/dev/null; then
-            return 1
+            port_in_use=true
         elif command_exists netstat && netstat -tuln | grep -q ":$port "; then
-            return 1
+            port_in_use=true
         elif command_exists ss && ss -tuln | grep -q ":$port "; then
-            return 1
+            port_in_use=true
         fi
     fi
-    # Fallback: Try connecting to the port (for Ollama)
-    if [ "$port" -eq "$OLLAMA_PORT" ] && command_exists curl && curl -s --connect-timeout 2 http://localhost:$port >/dev/null; then
+    # Fallback: Try connecting to the port
+    if ! $port_in_use && command_exists curl && curl -s --connect-timeout 2 http://localhost:$port >/dev/null; then
+        port_in_use=true
+    fi
+    if $port_in_use; then
         return 1
     fi
     log "WARNING" "No reliable port-checking tools found. Assuming port $port is free, but this may cause conflicts."
@@ -265,11 +270,11 @@ if command_exists ollama; then
     # Try to get PID if running
     if $OLLAMA_RUNNING; then
         if $IS_WINDOWS && command_exists tasklist; then
-            OLLAMA_PID=$(tasklist | grep -i "ollama" | awk '{print $2}' | head -1)
+            OLLAMA_PID=$(tasklist /FI "IMAGENAME eq ollama.exe" /FO CSV | grep "ollama.exe" | cut -d',' -f2 | tr -d '"')
         elif command_exists ps; then
             OLLAMA_PID=$(ps aux | grep -i "[o]llama serve" | awk '{print $2}' | head -1)
         fi
-        if [ -n "$OLLAMA_PID" ]; then
+        if [ -n "$OLLAMA_PID" ] && [[ "$OLLAMA_PID" =~ ^[0-9]+$ ]]; then
             log "INFO" "Ollama service is running (PID: $OLLAMA_PID)."
         else
             log "INFO" "Ollama service is running, but PID could not be determined."
@@ -347,26 +352,42 @@ done
 # Install backend dependencies
 log "INFO" "Installing backend dependencies..."
 pushd "$BACKEND_DIR" >/dev/null || { log "ERROR" "Backend directory not found."; exit 1; }
-$PYTHON_CMD -m pip install --upgrade pip >> "$LOG_FILE" 2>&1
-if $PYTHON_CMD -m pip install -r requirements.txt >> "$LOG_FILE" 2>&1; then
-    log "SUCCESS" "Backend dependencies installed successfully."
-else
-    log "ERROR" "Failed to install backend dependencies. Check $LOG_FILE for details."
+if [ ! -f "requirements.txt" ]; then
+    log "ERROR" "requirements.txt not found in $BACKEND_DIR. Ensure it exists and lists required packages."
     popd >/dev/null
     exit 1
 fi
+$PYTHON_CMD -m pip install --upgrade pip >> "$LOG_FILE" 2>&1
+if ! $PYTHON_CMD -m pip install -r requirements.txt > pip_install.log 2>&1; then
+    log "ERROR" "Failed to install backend dependencies. Check $LOG_FILE and pip_install.log for details."
+    log "INFO" "Common fixes:"
+    log "INFO" "- Ensure internet connectivity."
+    log "INFO" "- Use a virtual environment: python -m venv venv; source venv/bin/activate (or venv\\Scripts\\Activate.bat on Windows)"
+    log "INFO" "- Verify requirements.txt for compatible versions."
+    log "INFO" "- Install build tools for Windows: python -m pip install setuptools wheel"
+    cat pip_install.log | grep -i "ERROR" | tee -a "$LOG_FILE"
+    popd >/dev/null
+    exit 1
+fi
+log "SUCCESS" "Backend dependencies installed successfully."
+rm -f pip_install.log
 popd >/dev/null
 
 # Install frontend dependencies
 log "INFO" "Installing frontend dependencies..."
 pushd "$FRONTEND_DIR" >/dev/null || { log "ERROR" "Frontend directory not found."; exit 1; }
-if npm install >> "$LOG_FILE" 2>&1; then
-    log "SUCCESS" "Frontend dependencies installed successfully."
-else
-    log "ERROR" "Failed to install frontend dependencies. Check $LOG_FILE for details."
+if ! npm install > npm_install.log 2>&1; then
+    log "ERROR" "Failed to install frontend dependencies. Check $LOG_FILE and npm_install.log for details."
+    log "INFO" "Common fixes:"
+    log "INFO" "- Ensure internet connectivity."
+    log "INFO" "- Clear npm cache: npm cache clean --force"
+    log "INFO" "- Update npm: npm install -g npm"
+    cat npm_install.log | grep -i "error" | tee -a "$LOG_FILE"
     popd >/dev/null
     exit 1
 fi
+log "SUCCESS" "Frontend dependencies installed successfully."
+rm -f npm_install.log
 popd >/dev/null
 
 # Start backend and frontend in background
