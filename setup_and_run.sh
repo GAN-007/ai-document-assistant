@@ -896,7 +896,7 @@ fi
 rm -f main_import.log
 
 # Start backend
-$PIP_CMD run uvicorn --app-dir "$BACKEND_DIR" main:app --host 0.0.0.0 --port "$BACKEND_PORT" > uvicorn.log 2>&1 &
+$PYTHON_CMD -m uvicorn --app-dir "$BACKEND_DIR" main:app --host 0.0.0.0 --port "$BACKEND_PORT" > uvicorn.log 2>&1 &
 BACKEND_PID=$!
 sleep 5
 if ps -p $BACKEND_PID >/dev/null 2>&1; then
@@ -908,7 +908,7 @@ else
     log "INFO" "- Verify $BACKEND_DIR/main.py has a valid FastAPI app."
     log "INFO" "- Check port $BACKEND_PORT: netstat -ano | findstr :$BACKEND_PORT"
     log "INFO" "- Ensure dependencies are compatible with Python $PYTHON_VERSION."
-    log "INFO" "- Test manually: cd $BACKEND_DIR && $PIP_CMD run uvicorn --app-dir . main:app --host 0.0.0.0 --port $BACKEND_PORT"
+    log "INFO" "- Test manually: cd $BACKEND_DIR && $PYTHON_CMD -m uvicorn --app-dir . main:app --host 0.0.0.0 --port $BACKEND_PORT"
     cat uvicorn.log | grep -i "ERROR" | tee -a "$BACKEND_LOG"
     rm -f uvicorn.log
     exit 1
