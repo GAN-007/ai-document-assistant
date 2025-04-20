@@ -449,7 +449,7 @@ if ! grep -q "pydantic-settings" requirements.txt; then
 fi
 if ! grep -q "email-validator" requirements.txt; then
     log "WARNING" "email-validator not found in $BACKEND_DIR/requirements.txt. Adding email-validator>=2.2.0."
-    echo "email-validator>=2.2.0" >> requirements.txt
+    printf "email-validator>=2.2.0\n" >> requirements.txt
     $PIP_CMD install email-validator>=2.2.0 >> "$LOG_FILE" 2>&1
 fi
 rm -f pip_install.log

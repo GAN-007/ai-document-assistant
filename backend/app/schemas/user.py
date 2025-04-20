@@ -11,5 +11,5 @@ class UserResponse(BaseModel):
     name: str
     role: str
 
-    class Config:
-        orm_mode = True
+class Config:
+        from_attributes = True
