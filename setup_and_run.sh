@@ -20,6 +20,13 @@ OLLAMA_PORT=11434
 BACKEND_PORT=$DEFAULT_BACKEND_PORT
 FRONTEND_PORT=$DEFAULT_FRONTEND_PORT
 
+# Detect Windows environment (Git Bash)
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" || -n "$WINDIR" ]]; then
+    IS_WINDOWS=true
+else
+    IS_WINDOWS=false
+fi
+
 # Display help message
 show_help() {
     echo "AI Document Assistant Setup and Run Script"
@@ -37,7 +44,8 @@ show_help() {
     echo "  Backend log: $BACKEND_LOG"
     echo "  Frontend log: $FRONTEND_LOG"
     echo "Note for Windows/Git Bash users:"
-    echo "  Ensure Git Bash includes tools like curl, wget, or lsof. Install via MSYS2 if needed."
+    echo "  Install tools like net-tools, curl, wget via MSYS2: pacman -S net-tools curl wget"
+    echo "  For Ollama port conflicts, use 'netstat -ano | findstr :$OLLAMA_PORT' or Task Manager."
     exit 0
 }
 
@@ -122,15 +130,28 @@ command_exists() {
 # Function to check if a port is in use
 check_port() {
     local port=$1
-    if command_exists lsof && lsof -i :"$port" -sTCP:LISTEN >/dev/null; then
-        return 1
-    elif command_exists netstat && netstat -tuln | grep -q ":$port "; then
-        return 1
-    elif command_exists ss && ss -tuln | grep -q ":$port "; then
-        return 1
+    if $IS_WINDOWS; then
+        if command_exists netstat && netstat -ano | grep -i "LISTEN" | grep -q ":$port "; then
+            return 1
+        fi
     else
-        log "WARNING" "No port-checking tools (lsof, netstat, ss) found. Assuming port $port is free, but this may cause conflicts."
-        log "INFO" "For Git Bash, install tools via MSYS2: pacman -S lsof net-tools."
+        if command_exists lsof && lsof -i :"$port" -sTCP:LISTEN >/dev/null; then
+            return 1
+        elif command_exists netstat && netstat -tuln | grep -q ":$port "; then
+            return 1
+        elif command_exists ss && ss -tuln | grep -q ":$port "; then
+            return 1
+        fi
+    fi
+    # Fallback: Try connecting to the port (for Ollama)
+    if [ "$port" -eq "$OLLAMA_PORT" ] && command_exists curl && curl -s --connect-timeout 2 http://localhost:$port >/dev/null; then
+        return 1
+    fi
+    log "WARNING" "No reliable port-checking tools found. Assuming port $port is free, but this may cause conflicts."
+    if $IS_WINDOWS; then
+        log "INFO" "Run 'netstat -ano | findstr :$port' or install net-tools via MSYS2: pacman -S net-tools"
+    else
+        log "INFO" "Install tools: sudo apt-get install lsof net-tools || sudo yum install lsof net-tools"
     fi
     return 0
 }
@@ -161,7 +182,11 @@ check_service() {
         done
     else
         log "WARNING" "Neither curl nor wget found, skipping $name accessibility check."
-        log "INFO" "For Git Bash, install curl/wget via MSYS2: pacman -S curl wget."
+        if $IS_WINDOWS; then
+            log "INFO" "Install curl/wget via MSYS2: pacman -S curl wget"
+        else
+            log "INFO" "Install curl/wget: sudo apt-get install curl wget || sudo yum install curl wget"
+        fi
         return 0
     fi
     log "ERROR" "$name failed to start or is not accessible at $url. Check ${name,,}.log for details."
@@ -227,20 +252,28 @@ log "INFO" "npm found: $NPM_VERSION"
 # Check and start Ollama
 if command_exists ollama; then
     log "INFO" "Checking Ollama service..."
-    # Check if Ollama is running by port or process
+    # Check if Ollama is running by port or API
     OLLAMA_RUNNING=false
-    if check_port "$OLLAMA_PORT"; then
-        log "INFO" "Ollama port $OLLAMA_PORT is free, no service detected."
-    else
+    if ! check_port "$OLLAMA_PORT"; then
         OLLAMA_RUNNING=true
         log "INFO" "Ollama service detected on port $OLLAMA_PORT."
+    elif command_exists curl && curl -s --connect-timeout 2 http://localhost:$OLLAMA_PORT >/dev/null; then
+        OLLAMA_RUNNING=true
+        log "INFO" "Ollama API detected at http://localhost:$OLLAMA_PORT."
     fi
 
     # Try to get PID if running
-    if $OLLAMA_RUNNING && command_exists ps; then
-        OLLAMA_PID=$(ps aux | grep -i "[o]llama serve" | awk '{print $2}' | head -1)
+    if $OLLAMA_RUNNING; then
+        if $IS_WINDOWS && command_exists tasklist; then
+            OLLAMA_PID=$(tasklist | grep -i "ollama" | awk '{print $2}' | head -1)
+        elif command_exists ps; then
+            OLLAMA_PID=$(ps aux | grep -i "[o]llama serve" | awk '{print $2}' | head -1)
+        fi
         if [ -n "$OLLAMA_PID" ]; then
             log "INFO" "Ollama service is running (PID: $OLLAMA_PID)."
+        else
+            log "INFO" "Ollama service is running, but PID could not be determined."
+            OLLAMA_PID=""
         fi
     fi
 
@@ -252,7 +285,12 @@ if command_exists ollama; then
         sleep 5
         if ! ps -p $OLLAMA_PID >/dev/null 2>&1; then
             log "ERROR" "Failed to start Ollama service. Check if port $OLLAMA_PORT is in use."
-            log "INFO" "Run 'netstat -tuln | grep $OLLAMA_PORT' or 'lsof -i :$OLLAMA_PORT' to diagnose."
+            if $IS_WINDOWS; then
+                log "INFO" "Run 'netstat -ano | findstr :$OLLAMA_PORT' or check Task Manager."
+                log "INFO" "To stop the process (e.g., PID 1912): taskkill /PID 1912 /F"
+            else
+                log "INFO" "Run 'netstat -tuln | grep $OLLAMA_PORT' or 'lsof -i :$OLLAMA_PORT'."
+            fi
             exit 1
         fi
         OLLAMA_RUNNING=true
@@ -262,6 +300,10 @@ if command_exists ollama; then
     # Verify Ollama API
     if command_exists curl && ! curl -s --connect-timeout 5 http://localhost:$OLLAMA_PORT >/dev/null; then
         log "WARNING" "Ollama API is not responsive. Models may not work correctly."
+        if $IS_WINDOWS; then
+            log "INFO" "Check if Ollama is running: netstat -ano | findstr :$OLLAMA_PORT"
+            log "INFO" "Restart Ollama or stop the process on port $OLLAMA_PORT."
+        fi
     fi
 
     # Check and pull Ollama models with timeout
@@ -287,7 +329,11 @@ if command_exists ollama; then
     done
 else
     log "WARNING" "Ollama not found. T5 will be used as fallback."
-    log "INFO" "For Git Bash, install Ollama separately or ensure it's in PATH."
+    if $IS_WINDOWS; then
+        log "INFO" "Install Ollama from https://ollama.com and ensure it's in PATH."
+    else
+        log "INFO" "Install Ollama: curl https://ollama.com/install.sh | sh"
+    fi
 fi
 
 # Check ports
@@ -369,12 +415,16 @@ trap 'cleanup' SIGINT SIGTERM
 cleanup() {
     log "INFO" "Stopping services..."
     for pid in "$BACKEND_PID" "$FRONTEND_PID" "$OLLAMA_PID"; do
-        if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then
-            # Kill process and its children
-            pkill -P "$pid" 2>/dev/null
-            kill "$pid" 2>/dev/null
-            wait "$pid" 2>/dev/null
-            log "INFO" "Stopped process (PID: $pid)."
+        if [[ -n "$pid" ]]; then
+            if $IS_WINDOWS && command_exists taskkill; then
+                taskkill /PID "$pid" /F >/dev/null 2>&1
+                log "INFO" "Stopped process (PID: $pid)."
+            elif ps -p "$pid" >/dev/null 2>&1; then
+                pkill -P "$pid" 2>/dev/null
+                kill "$pid" 2>/dev/null
+                wait "$pid" 2>/dev/null
+                log "INFO" "Stopped process (PID: $pid)."
+            fi
         fi
     done
     log "SUCCESS" "Services stopped."
