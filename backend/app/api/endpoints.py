@@ -18,15 +18,12 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
 
 @router.post("/register", response_model=UserResponse)
 async def register(user: UserCreate, db: Session = Depends(get_db)):
-    # Check if user exists
     db_user = db.query(User).filter(User.email == user.email).first()
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
-    # Create new user
     hashed_password = get_password_hash(user.password)
     db_user = User(
         email=user.email,
-        name=user.name,
         hashed_password=hashed_password,
         role="user"
     )
@@ -62,7 +59,6 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
     content = await file.read()
     original_text, improved_text, suggestions = await process_document(file.filename, content, file.content_type)
     
-    # Save document
     db_document = Document(
         user_id=current_user.id,
         filename=file.filename,
@@ -70,11 +66,13 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
     )
     db.add(db_document)
     db.commit()
+    db.refresh(db_document)
     
     return DocumentResponse(
         originalText=original_text,
         improvedText=improved_text,
-        suggestions=suggestions
+        suggestions=suggestions,
+        filename=file.filename
     )
 
 @router.post("/save")
