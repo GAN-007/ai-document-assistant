@@ -11,4 +11,4 @@ python-multipart
 transformers
 torch
 ollama
-pydantic
+pydanticpydantic-settings>=2.0.0

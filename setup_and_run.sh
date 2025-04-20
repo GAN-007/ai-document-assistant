@@ -128,10 +128,15 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Function to check if a port is in use
+# Function to check if a port is in use (exclude Ollama port during conflict checks)
 check_port() {
     local port=$1
     local port_in_use=false
+    # Skip conflict check for Ollama port during port validation
+    if [ "$port" -eq "$OLLAMA_PORT" ]; then
+        log "INFO" "Skipping conflict check for Ollama port $OLLAMA_PORT."
+        return 0
+    fi
     if $IS_WINDOWS; then
         if command_exists netstat && netstat -ano | findstr ":$port" | findstr "LISTENING" >/dev/null; then
             port_in_use=true
@@ -258,7 +263,7 @@ if command_exists ollama; then
     log "INFO" "Checking Ollama service..."
     # Check if Ollama is running by port or API
     OLLAMA_RUNNING=false
-    if ! check_port "$OLLAMA_PORT"; then
+    if command_exists netstat && netstat -ano | findstr ":$OLLAMA_PORT" | findstr "LISTENING" >/dev/null; then
         OLLAMA_RUNNING=true
         log "INFO" "Ollama service detected on port $OLLAMA_PORT."
     elif command_exists curl && curl -s --connect-timeout 2 http://localhost:$OLLAMA_PORT >/dev/null; then
@@ -268,11 +273,8 @@ if command_exists ollama; then
 
     # Try to get PID if running
     if $OLLAMA_RUNNING; then
-        if $IS_WINDOWS && command_exists tasklist; then
-            OLLAMA_PID=$(tasklist | findstr /I ollama.exe | awk 'NR==1 {print $2}' 2>/dev/null)
-            if [ -z "$OLLAMA_PID" ] && command_exists netstat; then
-                OLLAMA_PID=$(netstat -ano | findstr ":$OLLAMA_PORT" | findstr "LISTENING" | awk '{print $5}' | head -1)
-            fi
+        if $IS_WINDOWS && command_exists netstat; then
+            OLLAMA_PID=$(netstat -ano | findstr ":$OLLAMA_PORT" | findstr "LISTENING" | awk '{print $5}' | head -1)
         elif command_exists ps; then
             OLLAMA_PID=$(ps aux | grep -i "[o]llama serve" | awk '{print $2}' | head -1)
         fi
@@ -354,29 +356,62 @@ done
 log "INFO" "Installing backend dependencies..."
 pushd "$BACKEND_DIR" >/dev/null || { log "ERROR" "Backend directory not found."; exit 1; }
 if [ ! -f "requirements.txt" ]; then
-    log "ERROR" "requirements.txt not found in $BACKEND_DIR. Ensure it exists and lists required packages."
-    popd >/dev/null
-    exit 1
+    log "ERROR" "requirements.txt not found in $BACKEND_DIR. Creating a minimal version."
+    cat > requirements.txt <<EOL
+fastapi>=0.115.0
+uvicorn>=0.32.0
+pydantic>=2.9.2
+pydantic-settings>=2.5.2
+email-validator>=2.2.0
+python-jose>=3.3.0
+passlib>=1.7.4
+python-multipart>=0.0.12
+sqlalchemy>=2.0.35
+transformers>=4.45.2
+torch>=2.4.1
+requests>=2.32.3
+EOL
 fi
-$PYTHON_CMD -m pip install --upgrade pip >> "$LOG_FILE" 2>&1
-if ! $PYTHON_CMD -m pip install -r requirements.txt > pip_install.log 2>&1; then
-    log "ERROR" "Failed to install backend dependencies. Check $LOG_FILE and pip_install.log for details."
+# Install build tools
+$PYTHON_CMD -m pip install --upgrade pip setuptools wheel >> "$LOG_FILE" 2>&1
+# Clear pip cache to avoid corrupted downloads
+$PYTHON_CMD -m pip cache purge >> "$LOG_FILE" 2>&1
+# Try installing dependencies with retries
+for attempt in {1..3}; do
+    if $PYTHON_CMD -m pip install -r requirements.txt > pip_install.log 2>&1; then
+        log "SUCCESS" "Backend dependencies installed successfully."
+        break
+    else
+        log "WARNING" "Attempt $attempt: Failed to install backend dependencies. Retrying..."
+        sleep 2
+    fi
+done
+if [ ! -f "pip_install.log" ] || grep -q "ERROR" pip_install.log; then
+    log "ERROR" "Failed to install backend dependencies after retries. Check $LOG_FILE and pip_install.log for details."
     log "INFO" "Common fixes:"
     log "INFO" "- Ensure internet connectivity."
     log "INFO" "- Use a virtual environment: python -m venv venv; source venv/bin/activate (or venv\\Scripts\\Activate.bat on Windows)"
     log "INFO" "- Verify requirements.txt for compatible versions."
-    log "INFO" "- Install build tools for Windows: python -m pip install setuptools wheel"
-    cat pip_install.log | grep -i "ERROR" | tee -a "$LOG_FILE"
+    log "INFO" "- Install build tools: python -m pip install setuptools wheel"
+    log "INFO" "- Clear pip cache: python -m pip cache purge"
+    log "INFO" "- Test manually: cd $BACKEND_DIR && $PYTHON_CMD -m pip install -r requirements.txt"
+    if [ -f pip_install.log ]; then
+        cat pip_install.log | grep -i "ERROR" | head -n 10 | tee -a "$LOG_FILE"
+    fi
     popd >/dev/null
     exit 1
 fi
-# Ensure pydantic-settings is installed
+# Ensure pydantic-settings and email-validator are installed
 if ! grep -q "pydantic-settings" "requirements.txt"; then
-    log "WARNING" "pydantic-settings not found in $BACKEND_DIR/requirements.txt. Adding pydantic-settings>=2.0.0."
-    echo "pydantic-settings>=2.0.0" >> "requirements.txt"
-    $PYTHON_CMD -m pip install pydantic-settings>=2.0.0 >> "$LOG_FILE" 2>&1
+    log "WARNING" "pydantic-settings not found in $BACKEND_DIR/requirements.txt. Adding pydantic-settings>=2.5.2."
+    echo "pydantic-settings>=2.5.2" >> "requirements.txt"
+    $PYTHON_CMD -m pip install pydantic-settings>=2.5.2 >> "$LOG_FILE" 2>&1
 fi
-log "SUCCESS" "Backend dependencies installed successfully."
+if ! grep -q "email-validator" "requirements.txt"; then
+    log "WARNING" "email-validator not found in $BACKEND_DIR/requirements.txt. Adding email-validator>=2.2.0."
+    echo "email-validator>=2.2.0" >> "requirements.txt"
+    $PYTHON_CMD -m pip install email-validator>=2.2.0 >> "$LOG_FILE" 2>&1
+fi
 rm -f pip_install.log
 popd >/dev/null
 
