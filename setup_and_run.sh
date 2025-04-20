@@ -13,6 +13,7 @@ OLLAMA_MODELS=("llama3.1:latest" "llama2:latest")
 LOG_FILE="setup_and_run.log"
 BACKEND_LOG="backend.log"
 FRONTEND_LOG="frontend.log"
+LOG_MAX_SIZE=$((10*1024*1024)) # 10MB
 
 # Initialize ports from arguments
 BACKEND_PORT=$DEFAULT_BACKEND_PORT
@@ -20,11 +21,20 @@ FRONTEND_PORT=$DEFAULT_FRONTEND_PORT
 
 # Display help message
 show_help() {
+    echo "AI Document Assistant Setup and Run Script"
     echo "Usage: $0 [--backend-port <port>] [--frontend-port <port>] [--help]"
     echo "Options:"
     echo "  --backend-port <port>  Specify backend port (default: $DEFAULT_BACKEND_PORT)"
     echo "  --frontend-port <port> Specify frontend port (default: $DEFAULT_FRONTEND_PORT)"
     echo "  --help                Display this help message"
+    echo "Description:"
+    echo "  Installs dependencies and runs the backend (FastAPI) and frontend (React/Vite)."
+    echo "  Supports Llama3.1, Llama2 (Ollama), and T5 (Hugging Face) for AI document processing."
+    echo "  Demo account: email: demo@example.com, password: password"
+    echo "Logs:"
+    echo "  Main log: $LOG_FILE"
+    echo "  Backend log: $BACKEND_LOG"
+    echo "  Frontend log: $FRONTEND_LOG"
     exit 0
 }
 
@@ -71,12 +81,24 @@ log() {
     fi
 }
 
-# Append to log file with a separator for new run
-if [ -f "$LOG_FILE" ]; then
-    echo -e "\n--- New Run: $timestamp ---\n" >> "$LOG_FILE"
-else
-    touch "$LOG_FILE"
-fi
+# Rotate log file if too large
+rotate_log() {
+    local file="$1"
+    if [ -f "$file" ] && [ "$(stat -c %s "$file" 2>/dev/null || stat -f %z "$file")" -gt "$LOG_MAX_SIZE" ]; then
+        mv "$file" "${file}.$(date '+%Y%m%d%H%M%S').bak"
+        log "INFO" "Rotated $file due to size exceeding $LOG_MAX_SIZE bytes."
+    fi
+}
+
+# Initialize log files with a separator
+for file in "$LOG_FILE" "$BACKEND_LOG" "$FRONTEND_LOG"; do
+    rotate_log "$file"
+    if [ -f "$file" ]; then
+        echo -e "\n--- New Run: $timestamp ---\n" >> "$file"
+    else
+        touch "$file"
+    fi
+done
 log "INFO" "Starting AI Document Assistant setup and run script"
 
 # Function to check if a command exists
@@ -103,11 +125,11 @@ check_port() {
 check_service() {
     local url=$1
     local name=$2
-    local retries=3
+    local retries=5
     local delay=5
     if command_exists curl; then
         for ((i=1; i<=retries; i++)); do
-            if curl -s --head "$url" >/dev/null; then
+            if curl -s --head --connect-timeout 5 "$url" >/dev/null; then
                 log "INFO" "$name is accessible at $url"
                 return 0
             fi
@@ -116,7 +138,7 @@ check_service() {
         done
     elif command_exists wget; then
         for ((i=1; i<=retries; i++)); do
-            if wget -q --spider "$url" >/dev/null; then
+            if wget -q --spider --timeout=5 "$url" >/dev/null; then
                 log "INFO" "$name is accessible at $url"
                 return 0
             fi
@@ -127,17 +149,30 @@ check_service() {
         log "WARNING" "Neither curl nor wget found, skipping $name accessibility check."
         return 0
     fi
-    log "ERROR" "$name failed to start or is not accessible at $url"
+    log "ERROR" "$name failed to start or is not accessible at $url. Check ${name,,}.log for details."
     return 1
 }
+
+# Check Git repository status
+if command_exists git && [ -d ".git" ]; then
+    log "INFO" "Checking Git repository status..."
+    if git status --porcelain | grep -q .; then
+        log "WARNING" "Uncommitted changes detected in Git repository. Consider committing before running."
+        git status --short
+    else
+        log "INFO" "Git repository is clean."
+    fi
+else
+    log "WARNING" "Not a Git repository or git not installed. Skipping Git status check."
+fi
 
 # Check prerequisites
 log "INFO" "Checking prerequisites..."
 
 # Check Python
-PYTHON_CMD="python3"
+PYTHON_CMD="python"
 if ! command_exists "$PYTHON_CMD"; then
-    PYTHON_CMD="python"
+    PYTHON_CMD="python3"
     if ! command_exists "$PYTHON_CMD"; then
         log "ERROR" "Python not found. Please install Python 3.8 or higher."
         exit 1
@@ -192,16 +227,21 @@ if command_exists ollama; then
         log "INFO" "Ollama service is already running (PID: $OLLAMA_PID)."
     fi
 
-    # Check and pull Ollama models
+    # Verify Ollama API
+    if command_exists curl && ! curl -s --connect-timeout 5 http://localhost:11434 >/dev/null; then
+        log "WARNING" "Ollama API is not responsive. Models may not work correctly."
+    fi
+
+    # Check and pull Ollama models with timeout
     for model in "${OLLAMA_MODELS[@]}"; do
         if ollama list | grep -q "$model"; then
             log "INFO" "Ollama model $model is available."
         else
             log "INFO" "Ollama model $model not found, pulling..."
-            if ollama pull "$model" >> "$LOG_FILE" 2>&1; then
+            if timeout 300 ollama pull "$model" >> "$LOG_FILE" 2>&1; then
                 log "SUCCESS" "Ollama model $model pulled successfully."
             else
-                log "WARNING" "Failed to pull Ollama model $model. T5 will be used as fallback."
+                log "WARNING" "Failed to pull Ollama model $model after 5 minutes. T5 will be used as fallback."
             fi
         fi
     done
@@ -278,6 +318,9 @@ log "INFO" "Frontend: http://localhost:$FRONTEND_PORT"
 log "INFO" "Backend API: http://localhost:$BACKEND_PORT"
 log "INFO" "Use Ctrl+C to stop the servers."
 log "INFO" "Demo account: email: demo@example.com, password: password"
+if command_exists git && [ -d ".git" ]; then
+    log "INFO" "Setup complete. Consider committing changes with: git add . && git commit -m 'Setup AI Document Assistant'"
+fi
 
 # Trap Ctrl+C for cleanup
 trap 'cleanup' SIGINT SIGTERM
