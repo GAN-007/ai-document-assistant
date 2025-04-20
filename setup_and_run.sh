@@ -133,7 +133,7 @@ check_port() {
     local port=$1
     local port_in_use=false
     if $IS_WINDOWS; then
-        if command_exists netstat && netstat -ano | grep -i "LISTEN" | grep -q ":$port "; then
+        if command_exists netstat && netstat -ano | findstr /R ":$port.*LISTENING" >/dev/null; then
             port_in_use=true
         fi
     else
@@ -204,6 +204,7 @@ if command_exists git && [ -d ".git" ]; then
     if git status --porcelain | grep -q .; then
         log "WARNING" "Uncommitted changes detected in Git repository. Consider committing before running."
         git status --short
+        log "INFO" "To commit: git add . && git commit -m 'Update project files'"
     else
         log "INFO" "Git repository is clean."
     fi
@@ -270,7 +271,7 @@ if command_exists ollama; then
     # Try to get PID if running
     if $OLLAMA_RUNNING; then
         if $IS_WINDOWS && command_exists tasklist; then
-            OLLAMA_PID=$(tasklist /FI "IMAGENAME eq ollama.exe" /FO CSV | grep "ollama.exe" | cut -d',' -f2 | tr -d '"')
+            OLLAMA_PID=$(tasklist | findstr /I "ollama.exe" | awk '{print $2}' | head -1)
         elif command_exists ps; then
             OLLAMA_PID=$(ps aux | grep -i "[o]llama serve" | awk '{print $2}' | head -1)
         fi
@@ -393,17 +394,49 @@ popd >/dev/null
 # Start backend and frontend in background
 log "INFO" "Starting backend and frontend servers..."
 
+# Check backend application
+if [ ! -f "$BACKEND_DIR/app/main.py" ]; then
+    log "ERROR" "Backend application file $BACKEND_DIR/app/main.py not found. Ensure the FastAPI application is correctly set up."
+    log "INFO" "Check the repository (https://github.com/GAN-007/ai-document-assistant) for the correct file."
+    exit 1
+fi
+# Validate main.py contents
+if ! grep -q "from fastapi import FastAPI" "$BACKEND_DIR/app/main.py" || ! grep -q "app = FastAPI" "$BACKEND_DIR/app/main.py"; then
+    log "WARNING" "$BACKEND_DIR/app/main.py does not appear to define a FastAPI app. Ensure it contains 'from fastapi import FastAPI' and 'app = FastAPI()'."
+fi
+# Test import of main module
+if ! $PYTHON_CMD -c "import sys; sys.path.append('$BACKEND_DIR/app'); from main import app" > main_import.log 2>&1; then
+    log "ERROR" "Failed to import backend.app.main module. Check $BACKEND_DIR/app/main.py for errors."
+    log "INFO" "Common fixes:"
+    log "INFO" "- Verify syntax and imports in $BACKEND_DIR/app/main.py."
+    log "INFO" "- Reinstall dependencies: cd $BACKEND_DIR && $PYTHON_CMD -m pip install -r requirements.txt"
+    log "INFO" "- Test manually: cd $BACKEND_DIR && $PYTHON_CMD -c 'from app.main import app'"
+    cat main_import.log | tee -a "$BACKEND_LOG"
+    rm -f main_import.log
+    exit 1
+fi
+rm -f main_import.log
+
 # Start backend
-$PYTHON_CMD -m uvicorn --app-dir "$BACKEND_DIR/app" main:app --host 0.0.0.0 --port "$BACKEND_PORT" > "$BACKEND_LOG" 2>&1 &
+$PYTHON_CMD -m uvicorn --app-dir "$BACKEND_DIR/app" main:app --host 0.0.0.0 --port "$BACKEND_PORT" > uvicorn.log 2>&1 &
 BACKEND_PID=$!
-sleep 2
+sleep 5 # Increased delay to capture startup errors
 if ps -p $BACKEND_PID >/dev/null 2>&1; then
     log "SUCCESS" "Backend started successfully (PID: $BACKEND_PID)."
     check_service "http://localhost:$BACKEND_PORT" "Backend"
 else
     log "ERROR" "Failed to start backend. Check $BACKEND_LOG for details."
+    log "INFO" "Common fixes:"
+    log "INFO" "- Verify $BACKEND_DIR/app/main.py has a valid FastAPI app."
+    log "INFO" "- Check port $BACKEND_PORT: netstat -ano | findstr :$BACKEND_PORT"
+    log "INFO" "- Ensure dependencies are compatible with Python $PYTHON_VERSION."
+    log "INFO" "- Test manually: cd $BACKEND_DIR && $PYTHON_CMD -m uvicorn --app-dir app main:app --host 0.0.0.0 --port $BACKEND_PORT"
+    cat uvicorn.log | grep -i "ERROR" | tee -a "$BACKEND_LOG"
+    rm -f uvicorn.log
     exit 1
 fi
+mv uvicorn.log "$BACKEND_LOG"
+popd >/dev/null 2>/dev/null || true
 
 # Start frontend
 pushd "$FRONTEND_DIR" >/dev/null
