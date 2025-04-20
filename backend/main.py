@@ -7,7 +7,7 @@ from app.database.db import init_db
 # Initialize FastAPI app
 app = FastAPI(
     title="AI Document Assistant API",
-    description="Backend for the AI Document Assistant, handling document processing and user authentication.",
+    description="Backend for the AI Document Assistant, handling document processing and user authentication.: By George Alfred Nyamema ",
     version="1.0.0",
 )
 
