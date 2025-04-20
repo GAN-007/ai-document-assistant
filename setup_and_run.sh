@@ -271,7 +271,7 @@ if command_exists ollama; then
     # Try to get PID if running
     if $OLLAMA_RUNNING; then
         if $IS_WINDOWS && command_exists tasklist; then
-            OLLAMA_PID=$(tasklist | findstr /I "ollama.exe" | head -1 | awk '{print $2}')
+            OLLAMA_PID=$(tasklist | findstr /I ollama.exe | awk 'NR==1 {print $2}')
         elif command_exists ps; then
             OLLAMA_PID=$(ps aux | grep -i "[o]llama serve" | awk '{print $2}' | head -1)
         fi
@@ -404,11 +404,24 @@ fi
 if ! grep -q "from fastapi import FastAPI" "$BACKEND_DIR/main.py" || ! grep -q "app = FastAPI" "$BACKEND_DIR/main.py"; then
     log "WARNING" "$BACKEND_DIR/main.py does not appear to define a FastAPI app. Ensure it contains 'from fastapi import FastAPI' and 'app = FastAPI()'."
 fi
+# Check for settings module
+if ! [ -f "$BACKEND_DIR/settings/config.py" ]; then
+    log "WARNING" "Settings module $BACKEND_DIR/settings/config.py not found. Creating a minimal configuration."
+    mkdir -p "$BACKEND_DIR/settings"
+    cat > "$BACKEND_DIR/settings/config.py" <<EOL
+class Config:
+    OLLAMA_API_URL = "http://localhost:11434"
+    DATABASE_URL = "sqlite:///documents.db"
+config = Config()
+EOL
+    log "INFO" "Created $BACKEND_DIR/settings/config.py with default settings."
+fi
 # Test import of main module
 if ! $PYTHON_CMD -c "import sys; sys.path.append('$BACKEND_DIR'); from main import app" > main_import.log 2>&1; then
     log "ERROR" "Failed to import $BACKEND_DIR.main module. Check $BACKEND_DIR/main.py for errors."
     log "INFO" "Common fixes:"
     log "INFO" "- Verify syntax and imports in $BACKEND_DIR/main.py."
+    log "INFO" "- Ensure $BACKEND_DIR/settings/config.py exists and is correct."
     log "INFO" "- Reinstall dependencies: cd $BACKEND_DIR && $PYTHON_CMD -m pip install -r requirements.txt"
     log "INFO" "- Test manually: cd $BACKEND_DIR && $PYTHON_CMD -c 'from main import app'"
     cat main_import.log | tee -a "$BACKEND_LOG"
