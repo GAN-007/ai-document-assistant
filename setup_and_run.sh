@@ -132,7 +132,6 @@ command_exists() {
 check_port() {
     local port=$1
     local port_in_use=false
-    # Skip conflict check for Ollama port during port validation
     if [ "$port" -eq "$OLLAMA_PORT" ]; then
         log "INFO" "Skipping conflict check for Ollama port $OLLAMA_PORT."
         return 0
@@ -152,7 +151,6 @@ check_port() {
             port_in_use=true
         fi
     fi
-    # Fallback: Try connecting to the port
     if ! $port_in_use && command_exists curl && curl -s --connect-timeout 2 http://localhost:$port >/dev/null; then
         port_in_use=true
     fi
@@ -191,7 +189,7 @@ check_service() {
     else
         log "WARNING" "Neither curl nor wget found, skipping $name accessibility check."
         if $IS_WINDOWS; then
-            log "INFO" "Install curl/wget via MSYS2: pacman -S curl wget"
+            log "INFO" "Install curl/wget via MSYS2: pacman -S net-tools curl wget"
         else
             log "INFO" "Install curl/wget: sudo apt-get install curl wget || sudo yum install curl wget"
         fi
@@ -261,7 +259,6 @@ log "INFO" "npm found: $NPM_VERSION"
 # Check and start Ollama
 if command_exists ollama; then
     log "INFO" "Checking Ollama service..."
-    # Check if Ollama is running by port or API
     OLLAMA_RUNNING=false
     if command_exists netstat && netstat -ano | findstr ":$OLLAMA_PORT" | findstr "LISTENING" >/dev/null; then
         OLLAMA_RUNNING=true
@@ -271,7 +268,6 @@ if command_exists ollama; then
         log "INFO" "Ollama API detected at http://localhost:$OLLAMA_PORT."
     fi
 
-    # Try to get PID if running
     if $OLLAMA_RUNNING; then
         if $IS_WINDOWS && command_exists netstat; then
             OLLAMA_PID=$(netstat -ano | findstr ":$OLLAMA_PORT" | findstr "LISTENING" | awk '{print $5}' | head -1)
@@ -286,7 +282,6 @@ if command_exists ollama; then
         fi
     fi
 
-    # Start Ollama if not running
     if ! $OLLAMA_RUNNING; then
         log "INFO" "Ollama service not running, attempting to start..."
         ollama serve &
@@ -306,7 +301,6 @@ if command_exists ollama; then
         log "SUCCESS" "Ollama service started (PID: $OLLAMA_PID)."
     fi
 
-    # Verify Ollama API
     if command_exists curl && ! curl -s --connect-timeout 5 http://localhost:$OLLAMA_PORT >/dev/null; then
         log "WARNING" "Ollama API is not responsive. Models may not work correctly."
         if $IS_WINDOWS; then
@@ -315,7 +309,6 @@ if command_exists ollama; then
         fi
     fi
 
-    # Check and pull Ollama models with timeout
     for model in "${OLLAMA_MODELS[@]}"; do
         if ollama list | grep -q "$model"; then
             log "INFO" "Ollama model $model is available."
@@ -365,6 +358,7 @@ pydantic-settings>=2.5.2
 email-validator>=2.2.0
 python-jose>=3.3.0
 passlib>=1.7.4
+bcrypt>=4.2.0
 python-multipart>=0.0.12
 sqlalchemy>=2.0.35
 transformers>=4.45.2
@@ -382,38 +376,33 @@ fi
 $PYTHON_CMD -m pip install --upgrade pip setuptools wheel >> "$LOG_FILE" 2>&1
 # Clear pip cache to avoid corrupted downloads
 $PYTHON_CMD -m pip cache purge >> "$LOG_FILE" 2>&1
-# Check Python version compatibility (Python 3.13 might have issues with some packages)
-if [ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -ge 13 ]; then
-    log "WARNING" "Python 3.13 detected. Some packages may not be compatible. Using virtual environment."
-    if [ ! -d "venv" ]; then
-        log "INFO" "Creating a virtual environment to isolate dependencies."
-        $PYTHON_CMD -m venv venv >> "$LOG_FILE" 2>&1
-        if [ $? -ne 0 ]; then
-            log "ERROR" "Failed to create virtual environment. Consider downgrading Python to 3.8-3.11."
-            log "INFO" "Alternatively, install manually: python -m pip install -r requirements.txt"
-            popd >/dev/null
-            exit 1
-        fi
-    fi
-    if $IS_WINDOWS; then
-        source venv/Scripts/activate >> "$LOG_FILE" 2>&1
-        PYTHON_CMD="$PWD/venv/Scripts/python"
-        PIP_CMD="$PWD/venv/Scripts/pip"
-    else
-        source venv/bin/activate >> "$LOG_FILE" 2>&1
-        PYTHON_CMD="$PWD/venv/bin/python"
-        PIP_CMD="$PWD/venv/bin/pip"
-    fi
-    if [ $? -eq 0 ]; then
-        log "INFO" "Virtual environment activated. Upgrading pip and installing build tools."
-        $PIP_CMD install --upgrade pip setuptools wheel >> "$LOG_FILE" 2>&1
-    else
-        log "ERROR" "Failed to activate virtual environment. Ensure venv module is available."
+# Always use a virtual environment
+log "INFO" "Setting up virtual environment to isolate dependencies."
+if [ ! -d "venv" ]; then
+    $PYTHON_CMD -m venv venv >> "$LOG_FILE" 2>&1
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Failed to create virtual environment. Ensure venv module is available."
+        log "INFO" "Alternatively, install manually: python -m pip install -r requirements.txt"
         popd >/dev/null
         exit 1
     fi
+fi
+if $IS_WINDOWS; then
+    source venv/Scripts/activate >> "$LOG_FILE" 2>&1
+    PYTHON_CMD="$PWD/venv/Scripts/python"
+    PIP_CMD="$PWD/venv/Scripts/pip"
 else
-    PIP_CMD="$PYTHON_CMD -m pip"
+    source venv/bin/activate >> "$LOG_FILE" 2>&1
+    PYTHON_CMD="$PWD/venv/bin/python"
+    PIP_CMD="$PWD/venv/bin/pip"
+fi
+if [ $? -eq 0 ]; then
+    log "INFO" "Virtual environment activated. Upgrading pip and installing build tools."
+    $PIP_CMD install --upgrade pip setuptools wheel >> "$LOG_FILE" 2>&1
+else
+    log "ERROR" "Failed to activate virtual environment. Ensure venv module is available."
+    popd >/dev/null
+    exit 1
 fi
 # Try installing dependencies with retries
 for attempt in {1..3}; do
@@ -429,11 +418,9 @@ if [ ! -f "pip_install.log" ] || grep -q "ERROR" pip_install.log; then
     log "ERROR" "Failed to install backend dependencies after retries. Check $LOG_FILE and pip_install.log for details."
     log "INFO" "Common fixes:"
     log "INFO" "- Ensure internet connectivity."
-    log "INFO" "- Use a virtual environment: python -m venv venv; source venv/bin/activate (or venv\\Scripts\\Activate.bat on Windows)"
     log "INFO" "- Verify requirements.txt for compatible versions."
-    log "INFO" "- Install build tools: python -m pip install setuptools wheel"
-    log "INFO" "- Clear pip cache: python -m pip cache purge"
-    log "INFO" "- If using Python 3.13, consider downgrading to Python 3.8-3.11 for better compatibility."
+    log "INFO" "- Install build tools: $PIP_CMD install setuptools wheel"
+    log "INFO" "- Clear pip cache: $PIP_CMD cache purge"
     log "INFO" "- Test manually: cd $BACKEND_DIR && $PIP_CMD install -r requirements.txt"
     if [ -f pip_install.log ]; then
         cat pip_install.log | grep -i "ERROR" | head -n 10 | tee -a "$LOG_FILE"
@@ -444,13 +431,18 @@ fi
 # Ensure pydantic-settings and email-validator are installed
 if ! grep -q "pydantic-settings" requirements.txt; then
     log "WARNING" "pydantic-settings not found in $BACKEND_DIR/requirements.txt. Adding pydantic-settings>=2.5.2."
-    echo "pydantic-settings>=2.5.2" >> requirements.txt
+    printf "pydantic-settings>=2.5.2\n" >> requirements.txt
     $PIP_CMD install pydantic-settings>=2.5.2 >> "$LOG_FILE" 2>&1
 fi
 if ! grep -q "email-validator" requirements.txt; then
     log "WARNING" "email-validator not found in $BACKEND_DIR/requirements.txt. Adding email-validator>=2.2.0."
     printf "email-validator>=2.2.0\n" >> requirements.txt
     $PIP_CMD install email-validator>=2.2.0 >> "$LOG_FILE" 2>&1
+fi
+if ! grep -q "bcrypt" requirements.txt; then
+    log "WARNING" "bcrypt not found in $BACKEND_DIR/requirements.txt. Adding bcrypt>=4.2.0."
+    printf "bcrypt>=4.2.0\n" >> requirements.txt
+    $PIP_CMD install bcrypt>=4.2.0 >> "$LOG_FILE" 2>&1
 fi
 rm -f pip_install.log
 popd >/dev/null
@@ -486,10 +478,10 @@ if ! grep -q "from fastapi import FastAPI" "$BACKEND_DIR/main.py" || ! grep -q "
     log "WARNING" "$BACKEND_DIR/main.py does not appear to define a FastAPI app. Ensure it contains 'from fastapi import FastAPI' and 'app = FastAPI()'."
 fi
 # Check for settings module
-if ! [ -f "$BACKEND_DIR/settings/config.py" ]; then
-    log "WARNING" "Settings module $BACKEND_DIR/settings/config.py not found. Creating a comprehensive configuration."
-    mkdir -p "$BACKEND_DIR/settings"
-    cat > "$BACKEND_DIR/settings/config.py" <<EOL
+if ! [ -f "$BACKEND_DIR/app/settings/config.py" ]; then
+    log "WARNING" "Settings module $BACKEND_DIR/app/settings/config.py not found. Creating a comprehensive configuration."
+    mkdir -p "$BACKEND_DIR/app/settings"
+    cat > "$BACKEND_DIR/app/settings/config.py" <<EOL
 from pydantic_settings import BaseSettings
 
 class Config(BaseSettings):
@@ -533,14 +525,192 @@ class Config(BaseSettings):
 
 config = Config()
 EOL
-    log "INFO" "Created $BACKEND_DIR/settings/config.py with default settings."
+    log "INFO" "Created $BACKEND_DIR/app/settings/config.py with default settings."
+fi
+# Validate endpoints.py for null bytes
+if [ -f "$BACKEND_DIR/app/api/endpoints.py" ]; then
+    if hexdump -ve '/1 "%02x"' "$BACKEND_DIR/app/api/endpoints.py" | grep -q "00"; then
+        log "ERROR" "Null bytes detected in $BACKEND_DIR/app/api/endpoints.py. Replacing with a clean version."
+        cat > "$BACKEND_DIR/app/api/endpoints.py" <<EOL
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+from typing import List
+from app.core.auth import create_access_token, get_current_user, verify_password, get_password_hash
+from app.core.document_processor import process_document
+from app.database.db import get_db
+from app.schemas.document import DocumentResponse, Suggestion
+from app.schemas.user import UserCreate, UserResponse
+from app.api.models import User, Document
+from app.settings.config import SUPPORTED_FILE_TYPES, MODEL_INFO
+from datetime import timedelta
+import os
+
+router = APIRouter()
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
+
+@router.post("/register", response_model=UserResponse)
+async def register(user: UserCreate, db: Session = Depends(get_db)):
+    db_user = db.query(User).filter(User.email == user.email).first()
+    if db_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    hashed_password = get_password_hash(user.password)
+    db_user = User(
+        email=user.email,
+        hashed_password=hashed_password,
+        role="user"
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+@router.post("/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=30)
+    access_token = create_access_token(data={"sub": user.email}, expires_delta=access_token_expires)
+    return {"access_token": access_token, "token_type": "bearer", "user": UserResponse.from_orm(user)}
+
+@router.post("/validate-token", response_model=UserResponse)
+async def validate_token(current_user: User = Depends(get_current_user)):
+    return current_user
+
+@router.post("/upload", response_model=DocumentResponse)
+async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if not any(file.content_type == ft["mime_type"] for ft in SUPPORTED_FILE_TYPES):
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+    if file.size > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(status_code=400, detail="File too large")
+    
+    content = await file.read()
+    original_text, improved_text, suggestions = await process_document(file.filename, content, file.content_type)
+    
+    db_document = Document(
+        user_id=current_user.id,
+        filename=file.filename,
+        content=improved_text
+    )
+    db.add(db_document)
+    db.commit()
+    db.refresh(db_document)
+    
+    return DocumentResponse(
+        originalText=original_text,
+        improvedText=improved_text,
+        suggestions=suggestions,
+        filename=file.filename
+    )
+
+@router.post("/save")
+async def save_document(document: DocumentResponse, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    db_document = db.query(Document).filter(Document.user_id == current_user.id, Document.filename == document.filename).first()
+    if not db_document:
+        db_document = Document(
+            user_id=current_user.id,
+            filename=document.filename,
+            content=document.improvedText
+        )
+        db.add(db_document)
+    else:
+        db_document.content = document.improvedText
+    db.commit()
+    return {"message": "Document saved successfully"}
+
+@router.get("/config/file-types")
+async def get_file_types():
+    return SUPPORTED_FILE_TYPES
+
+@router.get("/model-info")
+async def get_model_info():
+    return MODEL_INFO
+EOL
+    fi
+fi
+# Validate schema files
+if [ -f "$BACKEND_DIR/app/schemas/user.py" ]; then
+    if ! grep -q "UserResponse" "$BACKEND_DIR/app/schemas/user.py"; then
+        log "WARNING" "UserResponse not found in $BACKEND_DIR/app/schemas/user.py. Adding UserResponse schema."
+        cat > "$BACKEND_DIR/app/schemas/user.py" <<EOL
+from pydantic import BaseModel, EmailStr
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+
+    class Config:
+        from_attributes = True
+
+class UserResponse(BaseModel):
+    id: int
+    email: EmailStr
+    role: str
+
+    class Config:
+        from_attributes = True
+EOL
+    fi
+fi
+if [ ! -f "$BACKEND_DIR/app/schemas/document.py" ]; then
+    log "WARNING" "Document schema $BACKEND_DIR/app/schemas/document.py not found. Creating with DocumentResponse and Suggestion."
+    mkdir -p "$BACKEND_DIR/app/schemas"
+    cat > "$BACKEND_DIR/app/schemas/document.py" <<EOL
+from pydantic import BaseModel
+from typing import List
+
+class Suggestion(BaseModel):
+    text: str
+    type: str
+
+    class Config:
+        from_attributes = True
+
+class DocumentResponse(BaseModel):
+    originalText: str
+    improvedText: str
+    suggestions: List[Suggestion]
+    filename: str
+
+    class Config:
+        from_attributes = True
+EOL
+elif ! grep -q "from_attributes" "$BACKEND_DIR/app/schemas/document.py"; then
+    log "WARNING" "Pydantic 'from_attributes' not found in $BACKEND_DIR/app/schemas/document.py. Updating to fix orm_mode warning."
+    mv "$BACKEND_DIR/app/schemas/document.py" "$BACKEND_DIR/app/schemas/document.py.bak"
+    cat > "$BACKEND_DIR/app/schemas/document.py" <<EOL
+from pydantic import BaseModel
+from typing import List
+
+class Suggestion(BaseModel):
+    text: str
+    type: str
+
+    class Config:
+        from_attributes = True
+
+class DocumentResponse(BaseModel):
+    originalText: str
+    improvedText: str
+    suggestions: List[Suggestion]
+    filename: str
+
+    class Config:
+        from_attributes = True
+EOL
 fi
 # Test import of main module
 if ! $PYTHON_CMD -c "import sys; sys.path.append('$BACKEND_DIR'); from main import app" > main_import.log 2>&1; then
-    log "ERROR" "Failed to import $BACKEND_DIR.main module. Check $BACKEND_DIR/main.py for errors."
+    log "ERROR" "Failed to import $BACKEND_DIR/main.py module. Check $BACKEND_DIR/main.py for errors."
     log "INFO" "Common fixes:"
     log "INFO" "- Verify syntax and imports in $BACKEND_DIR/main.py."
-    log "INFO" "- Ensure $BACKEND_DIR/settings/config.py exists and is correct."
+    log "INFO" "- Ensure $BACKEND_DIR/app/settings/config.py exists and is correct."
     log "INFO" "- Reinstall dependencies: cd $BACKEND_DIR && $PIP_CMD install -r requirements.txt"
     log "INFO" "- Test manually: cd $BACKEND_DIR && $PYTHON_CMD -c 'from main import app'"
     cat main_import.log | tee -a "$BACKEND_LOG"
@@ -552,7 +722,7 @@ rm -f main_import.log
 # Start backend
 $PIP_CMD run uvicorn --app-dir "$BACKEND_DIR" main:app --host 0.0.0.0 --port "$BACKEND_PORT" > uvicorn.log 2>&1 &
 BACKEND_PID=$!
-sleep 5 # Increased delay to capture startup errors
+sleep 5
 if ps -p $BACKEND_PID >/dev/null 2>&1; then
     log "SUCCESS" "Backend started successfully (PID: $BACKEND_PID)."
     check_service "http://localhost:$BACKEND_PORT" "Backend"
@@ -574,7 +744,7 @@ popd >/dev/null 2>/dev/null || true
 pushd "$FRONTEND_DIR" >/dev/null
 npm run dev -- --port "$FRONTEND_PORT" > "../$FRONTEND_LOG" 2>&1 &
 FRONTEND_PID=$!
-sleep 10 # Increased delay for Vite startup
+sleep 10
 if ps -p $FRONTEND_PID >/dev/null 2>&1; then
     log "SUCCESS" "Frontend started successfully (PID: $FRONTEND_PID)."
     check_service "http://localhost:$FRONTEND_PORT" "Frontend"

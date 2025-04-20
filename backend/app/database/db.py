@@ -1,14 +1,11 @@
 from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from app.api.models import Base
+from app.settings.config import config
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./ai_document_assistant.db"
-
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+engine = create_engine(config.DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-def init_db():
-    Base.metadata.create_all(bind=engine)
+Base = declarative_base()
 
 def get_db():
     db = SessionLocal()
@@ -16,3 +13,7 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def init_db():
+    from app.api.models import User, Document
+    Base.metadata.create_all(bind=engine)
