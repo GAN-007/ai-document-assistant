@@ -11,4 +11,5 @@ python-multipart
 transformers
 torch
 ollama
-pydanticpydantic-settings>=2.0.0
+pydantic-settings>=2.5.2
+email-validator>=2.2.0
