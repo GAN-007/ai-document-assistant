@@ -1,4 +1,1 @@
-// Placeholder for additional API utility functions if needed in the future
-export const apiUtils = {
-    // Add utility functions here as needed
-};
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
